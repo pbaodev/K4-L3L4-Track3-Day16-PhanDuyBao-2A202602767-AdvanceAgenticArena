@@ -79,16 +79,62 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+        kept = []
+        split_used = False
+        for claim in claims:
+            text = claim.get("text") if isinstance(claim, dict) else None
+            if not isinstance(text, str) or not text:
+                continue
+            if ctx.saw(text):
+                kept.append(claim)
+                continue
+            parts = self._split(ctx, text, claim.get("doc_id"))
+            if parts:
+                split_used = True
+                kept.extend({**claim, "text": t, "doc_id": d} for t, d in parts)
+        report["claims"] = kept
+        if not kept:
+            report["abstain"] = True
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu đã đọc để trả lời câu hỏi này."
+        else:
+            if split_used:
+                report["abstain"] = True
+            report["citations"] = sorted(
+                {c["doc_id"] for c in kept if isinstance(c.get("doc_id"), str)}
+            )
+        return report
+
+    @staticmethod
+    def _source(ctx, docs, piece, fallback):
+        """doc_id của tài liệu đã đọc nguyên vẹn và chứa nguyên văn `piece`."""
+        for d in docs:
+            if piece in d.body and d.body in ctx.observed_text:
+                return d.doc_id
+        for d in docs:
+            if piece in d.body:
+                return d.doc_id
+        return fallback
+
+    @staticmethod
+    def _split(ctx, text, claim_doc):
+        """Tách câu ghép tại liên từ: hai nửa phải nguyên văn trong quan sát
+        và thuộc hai tài liệu khác nhau (cắt bớt, không sửa chữ)."""
+        docs = ctx.corpus.docs if ctx.corpus is not None else []
+        for sep in (" và ", " nhưng ", ", "):
+            pos = text.find(sep)
+            while pos != -1:
+                left, right = text[:pos], text[pos + len(sep):]
+                if left and right and ctx.saw(left) and ctx.saw(right):
+                    src_l = {d.doc_id for d in docs if left in d.body}
+                    src_r = {d.doc_id for d in docs if right in d.body}
+                    if src_l and src_r and not (src_l & src_r):
+                        return [
+                            (left, Critic._source(ctx, docs, left, claim_doc)),
+                            (right, Critic._source(ctx, docs, right, claim_doc)),
+                        ]
+                pos = text.find(sep, pos + 1)
+        return None
