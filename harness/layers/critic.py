@@ -91,10 +91,10 @@ class Critic(Middleware):
             if ctx.saw(text):
                 kept.append(claim)
                 continue
-            parts = self._split(ctx, text)
+            parts = self._split(ctx, text, claim.get("doc_id"))
             if parts:
                 split_used = True
-                kept.extend({**claim, "text": part} for part in parts)
+                kept.extend({**claim, "text": t, "doc_id": d} for t, d in parts)
         report["claims"] = kept
         if not kept:
             report["abstain"] = True
@@ -109,7 +109,18 @@ class Critic(Middleware):
         return report
 
     @staticmethod
-    def _split(ctx, text):
+    def _source(ctx, docs, piece, fallback):
+        """doc_id của tài liệu đã đọc nguyên vẹn và chứa nguyên văn `piece`."""
+        for d in docs:
+            if piece in d.body and d.body in ctx.observed_text:
+                return d.doc_id
+        for d in docs:
+            if piece in d.body:
+                return d.doc_id
+        return fallback
+
+    @staticmethod
+    def _split(ctx, text, claim_doc):
         """Tách câu ghép tại liên từ: hai nửa phải nguyên văn trong quan sát
         và thuộc hai tài liệu khác nhau (cắt bớt, không sửa chữ)."""
         docs = ctx.corpus.docs if ctx.corpus is not None else []
@@ -121,6 +132,9 @@ class Critic(Middleware):
                     src_l = {d.doc_id for d in docs if left in d.body}
                     src_r = {d.doc_id for d in docs if right in d.body}
                     if src_l and src_r and not (src_l & src_r):
-                        return [left, right]
+                        return [
+                            (left, Critic._source(ctx, docs, left, claim_doc)),
+                            (right, Critic._source(ctx, docs, right, claim_doc)),
+                        ]
                 pos = text.find(sep, pos + 1)
         return None
